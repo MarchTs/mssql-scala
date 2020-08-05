@@ -1,7 +1,6 @@
 package messages
 
 import entities.SomeEntity
-import facades.SomeFacade
 
 case class SomeMessage(id: String, name: String, value: Int) extends Message
 

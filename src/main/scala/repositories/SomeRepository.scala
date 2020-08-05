@@ -1,17 +1,14 @@
 package repositories
 
-import definitions.SQLServer.db
 import entities.SomeEntity
 import slick.jdbc.SQLServerProfile.api._
 import slick.lifted.ProvenShape
-
-import scala.concurrent.Future
 
 class SomeRepository {
 
   val tableQuery: TableQuery[SomeTables] = TableQuery[SomeTables]
 
-  def get(id: Int): DBIO[Option[SomeEntity]] = {
+  def get(id: String): DBIO[Option[SomeEntity]] = {
 
     val action = tableQuery
       .take(1)
