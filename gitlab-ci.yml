@@ -1,0 +1,141 @@
+stages:
+  - build
+  - package
+  - migrate
+  - deploy
+
+variables:
+  # PRODUCTION
+  PROD_CONF: "./src/main/resources/production.conf"
+  PROD_GKE_CLUSTER_NAME: iconkaset-prod
+  PROD_GKE_CLUSTER_ZONE: asia-southeast1-a
+  PROD_DB: jdbc:postgresql://35.197.130.77:5432/npc-db
+  PROD_DB_USER: gitlab-ci
+  PROD_DB_PASSWORD: a5XQYKWhsUPR7tm9
+
+  # DEVELOP
+  DEV_CONF: "./src/main/resources/develop.conf"
+  DEV_GKE_CLUSTER_NAME: iconkaset-dev
+  DEV_GKE_CLUSTER_ZONE: asia-southeast1-a
+  DEV_DB: jdbc:postgresql://34.87.189.35:5432/npc-db
+  DEV_DB_USER: gitlab-ci
+  DEV_DB_PASSWORD: develop
+
+  # COMMON
+  GCP_PROJECT_ID: iconkaset-app
+  REGISTRY_HOST: https://asia.gcr.io
+
+before_script:
+  - APP_VERSION=`grep 'version' ./src/main/resources/common.conf | cut -d '"' -f2`
+  - REGISTRY_IMAGE="asia.gcr.io/$GCP_PROJECT_ID/$CI_PROJECT_NAME:${APP_VERSION}"
+  - DEV_REGISTRY_IMAGE="$REGISTRY_IMAGE-develop"
+  - PROD_REGISTRY_IMAGE=$REGISTRY_IMAGE
+
+build:
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop" || $CI_COMMIT_REF_NAME == "master"'
+  stage: build
+  image: hseeberger/scala-sbt:8u222_1.3.4_2.13.1
+  variables:
+    SBT_VERSION: "1.3.4"
+    SBT_OPTS: "-Dsbt.global.base=sbt-cache/.sbtboot -Dsbt.boot.directory=sbt-cache/.boot -Dsbt.ivy.home=sbt-cache/.ivy"
+    COURSIER_CACHE: sbt-cache/coursier
+  cache:
+    paths:
+      - "sbt-cache/.ivy/cache"
+      - "sbt-cache/.boot"
+      - "sbt-cache/.sbtboot"
+      - "sbt-cache/coursier"
+  script:
+    - sbt compile dist --supershell=false
+  artifacts:
+    paths:
+      - target/universal/
+
+
+###############################################
+#                   DEVELOP
+###############################################
+package-develop:
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop"'
+  stage: package
+  image: docker:stable
+  services:
+    - docker:dind
+  script:
+    - echo $GCLOUD_SERVICE_KEY | base64 -d > ${HOME}/gcloud-service-key.json
+    - docker login -u _json_key --password-stdin $REGISTRY_HOST < ${HOME}/gcloud-service-key.json
+    - docker build -f Dockerfile --build-arg configfile=$DEV_CONF -t "$DEV_REGISTRY_IMAGE" .
+    - docker push $DEV_REGISTRY_IMAGE
+
+migrate-develop:
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop"'
+  stage: migrate
+  image: docker:stable
+  services:
+    - docker:dind
+  variables:
+    FLYWAY_EDITION: community
+  script:
+    - docker pull flyway/flyway
+    - docker run --rm -v ${PWD}/database:/flyway/sql flyway/flyway -url=$DEV_DB -user=$DEV_DB_USER -password=$DEV_DB_PASSWORD -baselineOnMigrate=true migrate
+
+deploy-develop:
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "develop"'
+  stage: deploy
+  image: google/cloud-sdk:latest
+  script:
+    - echo $GCLOUD_SERVICE_KEY | base64 -d > ${HOME}/gcloud-k8s-key.json
+    - gcloud auth activate-service-account --key-file ${HOME}/gcloud-k8s-key.json
+    - gcloud container clusters get-credentials $DEV_GKE_CLUSTER_NAME --zone $DEV_GKE_CLUSTER_ZONE --project $GCP_PROJECT_ID
+    - template=`cat "deploy-develop.yaml.template" | sed "s@{{REGISTRY_IMAGE}}@$DEV_REGISTRY_IMAGE@"`
+    - echo "$template" | kubectl apply -f -
+  environment:
+    name: develop
+
+
+###############################################
+#                   PRODUCTION
+###############################################
+package-production:
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "master"'
+  stage: package
+  image: docker:stable
+  services:
+    - docker:dind
+  script:
+    - echo $GCLOUD_SERVICE_KEY | base64 -d > ${HOME}/gcloud-service-key.json
+    - docker login -u _json_key --password-stdin $REGISTRY_HOST < ${HOME}/gcloud-service-key.json
+    - docker build -f Dockerfile --build-arg configfile=$PROD_CONF -t "$PROD_REGISTRY_IMAGE" .
+    - docker push $PROD_REGISTRY_IMAGE
+
+migrate-production:
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "master"'
+  stage: migrate
+  image: docker:stable
+  services:
+    - docker:dind
+  variables:
+    FLYWAY_EDITION: community
+  script:
+    - docker pull flyway/flyway
+    - docker run --rm -v ${PWD}/database:/flyway/sql flyway/flyway -url=$PROD_DB -user=$PROD_DB_USER -password=$PROD_DB_PASSWORD -baselineOnMigrate=true migrate
+
+deploy-production:
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "master"'
+  stage: deploy
+  image: google/cloud-sdk:latest
+  script:
+    - echo $GCLOUD_SERVICE_KEY | base64 -d > ${HOME}/gcloud-k8s-key.json
+    - gcloud auth activate-service-account --key-file ${HOME}/gcloud-k8s-key.json
+    - gcloud container clusters get-credentials $PROD_GKE_CLUSTER_NAME --zone $PROD_GKE_CLUSTER_ZONE --project $GCP_PROJECT_ID
+    - template=`cat "deploy-production.yaml.template" | sed "s@{{REGISTRY_IMAGE}}@$PROD_REGISTRY_IMAGE@"`
+    - echo "$template" | kubectl apply -f -
+  environment:
+    name: production
